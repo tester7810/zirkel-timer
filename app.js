@@ -14,13 +14,14 @@
   const validCfg = o => !!(o && Array.isArray(o.workouts) && o.workouts.length &&
     o.workouts.every(w => w && typeof w.id === 'string' && Array.isArray(w.steps) && w.steps.every(s => s && typeof s.ex === 'string')));
   function normCfg(o) {
-    const d = clone(DEF);
-    return { ...d, ...o, times: { ...d.times, ...o.times }, jog: { ...d.jog, ...o.jog }, sound: { ...d.sound, ...o.sound } };
+    const d = clone(DEF), c = { ...d, ...o, times: { ...d.times, ...o.times }, jog: { ...d.jog, ...o.jog }, sound: { ...d.sound, ...o.sound } };
+    delete c.sound.vibrate;
+    return c;
   }
   let cfg = (() => { const s = store.get(KEY.cfg, null); return validCfg(s) ? normCfg(s) : clone(DEF); })();
   let hist = store.get(KEY.hist, []);
   let sess = store.get(KEY.sess, null);
-  let selWid = null, editWid = null, lastDone = null, curIdx = -1, tickSec = -1, halfDone = false, curPhase = '';
+  let selWid = null, editWid = null, lastDone = null, curIdx = -1, tickSec = -1, halfDone = false, curPhase = '', freshStart = false;
 
   const saveCfg = () => store.set(KEY.cfg, cfg);
   const saveHist = () => store.set(KEY.hist, hist);
@@ -64,12 +65,14 @@
     setTimeout(() => t.remove(), 2600);
   }
 
-  // ---------- Ton, Sprache, Vibration, Bildschirm ----------
+  // ---------- Ton, Sprache, Bildschirm ----------
   let actx = null, lock = null;
   function audioInit() {
     try {
+      const fresh = !actx;
       if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
       if (actx.state === 'suspended') actx.resume();
+      if (fresh) warmVoice();
     } catch (e) { /* kein Ton verfügbar */ }
   }
   function beep(freq, dur, vol = 0.3, delay = 0) {
@@ -80,18 +83,40 @@
     g.gain.setValueAtTime(vol, t + Math.max(0.02, dur - 0.04)); g.gain.linearRampToValueAtTime(0, t + dur);
     o.start(t); o.stop(t + dur + 0.02);
   }
-  function speak(text) {
-    if (!cfg.sound.voice || !('speechSynthesis' in window)) return;
-    try {
-      speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = 'de-DE'; u.rate = 1.05;
-      const v = speechSynthesis.getVoices().find(x => x.lang && x.lang.toLowerCase().startsWith('de'));
-      if (v) u.voice = v;
-      speechSynthesis.speak(u);
-    } catch (e) { /* Sprachausgabe nicht verfügbar */ }
+  // Ansagen sind vorab erzeugte Clips (Männerstimme, Ordner v/), damit die Stimme auf jedem Handy gleich ist.
+  const clips = {};
+  let voiceSrc = [], voiceSeq = 0;
+  function loadClip(n) {
+    if (!actx) return Promise.resolve(null);
+    return clips[n] || (clips[n] = fetch(`v/${n}.mp3`).then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error(n)))
+      .then(b => actx.decodeAudioData(b)).catch(() => null));
   }
-  const buzz = p => { if (cfg.sound.vibrate && navigator.vibrate) navigator.vibrate(p); };
+  const speedClip = v => Number.isInteger(v * 2) && v >= 4 && v <= 16 ? 'speed_' + String(v).replace('.', '_') : 'jog';
+  const exClip = id => 'ex_' + id;
+  function warmVoice() {
+    if (!cfg.sound.voice || !sess) return;
+    const names = ['prep', 'next', 'tre', 'side', 'done', 'jog'];
+    sess.steps.forEach(s => names.push(exClip(s.ex)));
+    sess.tl.segs.forEach(g => { if (g.kind === 'jog') names.push(speedClip(g.speed)); });
+    new Set(names).forEach(loadClip);
+  }
+  // lead: Sekunden Abstand zu einem direkt davor gespielten Piepton
+  async function say(lead, ...names) {
+    if (!cfg.sound.voice || !actx) return;
+    const my = ++voiceSeq;
+    const bufs = await Promise.all(names.map(loadClip));
+    if (my !== voiceSeq) return;
+    voiceSrc.forEach(s => { try { s.stop(); } catch (e) { /* schon beendet */ } });
+    voiceSrc = [];
+    let t = actx.currentTime + lead;
+    bufs.forEach(b => {
+      if (!b) return;
+      const s = actx.createBufferSource();
+      s.buffer = b; s.connect(actx.destination); s.start(t);
+      t += b.duration + 0.12; voiceSrc.push(s);
+    });
+  }
+  function stopVoice() { voiceSeq++; voiceSrc.forEach(s => { try { s.stop(); } catch (e) { /* schon beendet */ } }); voiceSrc = []; }
   async function wake() {
     try {
       if ('wakeLock' in navigator && !lock && document.visibilityState === 'visible') {
@@ -110,14 +135,14 @@
     const wk = clone(workoutById(wid)), tl = TL.build(wk, cfg);
     if (!tl.segs.length) { toast('Die Einheit hat keine Übungen.'); return; }
     sess = { wid: wk.id, name: wk.name, steps: wk.steps, tl, offset: 0, resumed: Date.now(), paused: false, touched: Date.now() };
-    saveSess(); curIdx = -1; wake(); go('run');
+    saveSess(); curIdx = -1; freshStart = true; wake(); warmVoice(); go('run');
   }
 
   function finish(completed, save) {
     const s = sess;
     if (!s) return;
     const sec = Math.round(Math.min(elapsed(), s.tl.total));
-    sess = null; saveSess(); unwake(); curIdx = -1;
+    sess = null; saveSess(); unwake(); stopVoice(); curIdx = -1;
     if (completed || save) {
       hist.push({ ts: Date.now(), wid: s.wid, name: s.name, sec, partial: !completed });
       saveHist();
@@ -125,7 +150,7 @@
     if (completed) {
       lastDone = { name: s.name, sec };
       beep(660, 0.2); beep(880, 0.2, 0.3, 0.22); beep(1100, 0.4, 0.3, 0.44);
-      speak('Fertig. Gut gemacht.'); buzz([200, 100, 200, 100, 400]);
+      say(1, 'done');
       go('done');
     } else go('');
   }
@@ -134,7 +159,7 @@
     sess.offset = sec; sess.resumed = Date.now(); sess.touched = Date.now(); saveSess(); tick();
   }
   function togglePause() {
-    if (!sess.paused) { sess.offset = elapsed(); sess.paused = true; unwake(); }
+    if (!sess.paused) { sess.offset = elapsed(); sess.paused = true; unwake(); stopVoice(); }
     else { sess.resumed = Date.now(); sess.paused = false; wake(); audioInit(); }
     sess.touched = Date.now(); saveSess(); tick();
   }
@@ -143,15 +168,14 @@
     const seg = sess.tl.segs[curIdx];
     if (el - seg.start > 1.5) return; // Wiederaufnahme nach längerer Pause: keine alten Signale
     const st = sess.steps;
-    const nm = i => exOf(st[i].ex).name;
-    if (seg.kind === 'prep') { buzz(100); speak(`Gleich geht's los. Erste Übung: ${nm(seg.step)}`); }
-    else if (seg.kind === 'work') { beep(880, 0.45); buzz(300); }
+    if (seg.kind === 'prep') say(0.05, 'prep', exClip(st[seg.step].ex));
+    else if (seg.kind === 'work') beep(880, 0.45);
     else if (seg.kind === 'rest') {
-      beep(520, 0.3); buzz(150);
-      speak(seg.next != null ? `Als Nächstes: ${nm(seg.next)}` : 'Weiter zum Laufband');
+      beep(520, 0.3);
+      if (seg.next != null) say(0.4, 'next', exClip(st[seg.next].ex)); else say(0.4, 'tre');
     } else if (seg.kind === 'jog') {
-      beep(660, 0.5); buzz(300);
-      speak(`Laufband. ${String(seg.speed).replace('.', ',')} Kilometer pro Stunde`);
+      beep(660, 0.5);
+      say(0.55, speedClip(seg.speed));
     }
   }
 
@@ -188,6 +212,7 @@
     $('#wkNote').textContent = note;
     $('#wkNext').textContent = next;
     $('#wkPhase').textContent = curPhase;
+    $('#wkVoice').textContent = cfg.sound.voice ? '🔊 Ansage' : '🔇 Ansage aus';
   }
 
   function tick() {
@@ -209,7 +234,7 @@
     if (sec >= 1 && sec <= 3 && sec !== tickSec && seg.dur > 3) { tickSec = sec; beep(sec === 1 ? 740 : 660, 0.12, 0.25); }
     if (seg.kind === 'work' && cfg.sound.halfway && exOf(sess.steps[seg.step].ex).uni && !halfDone && el - seg.start >= seg.dur / 2) {
       halfDone = true;
-      beep(700, 0.12, 0.3); beep(700, 0.12, 0.3, 0.2); buzz([120, 80, 120]); speak('Seite wechseln');
+      beep(700, 0.12, 0.3); beep(700, 0.12, 0.3, 0.2); say(0.5, 'side');
       if ($('#wkNote')) $('#wkNote').textContent = 'Seite wechseln!';
     }
   }
@@ -264,7 +289,7 @@
     <div id="wkFig"></div><div class="name" id="wkName"></div><div class="cue" id="wkCue"></div>
     <div class="note" id="wkNote"></div><div class="next" id="wkNext"></div>
     <div class="ctrl"><button data-act="prev" aria-label="Zurück">⏮</button><button data-act="pause" id="wkPause" aria-label="Pause">⏸</button><button data-act="skip" aria-label="Weiter">⏭</button></div>
-    <div class="foot"><button class="ghost" data-act="exinfo">ⓘ Übungsinfo</button><button class="ghost" data-go="">Menü</button><button class="ghost" data-act="end">Beenden</button></div></section>`;
+    <div class="foot"><button class="ghost" data-act="voice" id="wkVoice"></button><button class="ghost" data-act="exinfo">ⓘ Info</button><button class="ghost" data-go="">Menü</button><button class="ghost" data-act="end">Beenden</button></div></section>`;
 
   function infoBlock(id) {
     const i = INFO[id];
@@ -302,7 +327,7 @@
         ${num('Geschwindigkeit (km/h)', 'jog.speed', 0.5)}
         <label>Steigung (Text)</label><input type="text" data-k="jog.incline" value="${esc(cfg.jog.incline)}">
         <p id="tot" class="mut"></p></div>
-      <div class="card"><h2>Signale</h2>${chk('Töne', 'sound.beep')}${chk('Sprachansagen', 'sound.voice')}${chk('Vibration', 'sound.vibrate')}${chk('Seitenwechsel-Signal bei einbeinigen Übungen', 'sound.halfway')}</div>
+      <div class="card"><h2>Signale</h2>${chk('Töne (Piepen)', 'sound.beep')}${chk('Sprachansagen (Männerstimme)', 'sound.voice')}${chk('Seitenwechsel-Signal bei einbeinigen Übungen', 'sound.halfway')}<p class="mut">Die Ansage lässt sich auch im Training mit dem Lautsprecher-Knopf unten an- und ausschalten.</p></div>
       <div class="card"><h2>Sichern &amp; Übertragen</h2>
         <div class="grid2"><button data-act="exp">Konfiguration exportieren</button><button data-act="imp">Konfiguration importieren</button></div>
         <input type="file" id="file" accept="application/json,.json" hidden>
@@ -346,7 +371,10 @@
     app.innerHTML = (views[p] || viewHome)();
     window.scrollTo(0, 0);
     if (p === 'run') {
-      if (curIdx < 0) curIdx = TL.index(sess.tl, elapsed());
+      if (curIdx < 0) {
+        curIdx = TL.index(sess.tl, elapsed());
+        if (freshStart) { freshStart = false; onSegment(elapsed()); }
+      }
       runBody(); tick();
       if (!actx || actx.state !== 'running') toast('Einmal auf den Bildschirm tippen, damit Ton und Ansagen aktiv werden.');
     }
@@ -372,6 +400,11 @@
       if (r.v === 'save') finish(false, true); else if (r.v === 'drop') finish(false, false);
     },
     pause: togglePause,
+    voice() {
+      cfg.sound.voice = !cfg.sound.voice; saveCfg();
+      if (cfg.sound.voice) warmVoice(); else stopVoice();
+      $('#wkVoice').textContent = cfg.sound.voice ? '🔊 Ansage' : '🔇 Ansage aus';
+    },
     skip: () => { const seg = sess.tl.segs[curIdx]; seek(seg.end + 0.001); },
     prev: () => {
       const segs = sess.tl.segs, seg = segs[curIdx];

@@ -1,5 +1,9 @@
-const CACHE = 'zirkel-v2';
-const FILES = ['./', 'index.html', 'app.js', 'figures.js', 'exercises.js', 'info.js', 'timeline.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
+const CACHE = 'zirkel-v3';
+// Ansage-Clips (Ordner v/). Neue Übung oder Clip: hier mit ergänzen, sonst fehlt er offline.
+const CLIPS = ['prep', 'next', 'tre', 'side', 'done', 'jog',
+  ...['liegestuetz', 'pistol', 'ironmike', 'huefte_einbein', 'klimmzug', 'nordic', 'dips', 'seitheben', 'reverse_fly', 'bizepscurl', 'crunch', 'reverse_crunch', 'pike', 'bulgarian'].map(x => 'ex_' + x),
+  ...Array.from({ length: 25 }, (_, i) => 'speed_' + String((8 + i) / 2).replace('.', '_'))].map(n => `v/${n}.mp3`);
+const FILES = ['./', 'index.html', 'app.js', 'figures.js', 'exercises.js', 'info.js', 'timeline.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', ...CLIPS];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));

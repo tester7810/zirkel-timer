@@ -31,7 +31,7 @@
     version: 1,
     times: { work: 45, rest: 20, prep: 10 },
     jog: { seconds: 750, speed: 11, incline: 'an (ca. 2 %)' },
-    sound: { beep: true, voice: true, vibrate: true, halfway: true },
+    sound: { beep: true, voice: true, halfway: true },
     workouts: [
       mk('A', 'Einheit A', 'ironmike', 'pistol'),
       mk('B', 'Einheit B', 'ironmike', 'huefte_einbein'),
