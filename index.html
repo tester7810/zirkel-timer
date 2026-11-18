@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#111111">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<title>Zirkel-Timer</title>
+<style>
+  body { margin: 0; padding: 20px; background: #111; color: #eee; font: 18px/1.4 system-ui, sans-serif; }
+  h1 { font-size: 22px; margin: 0 0 12px; }
+  .row { padding: 10px 12px; margin: 8px 0; background: #1d1d1d; border-radius: 10px; }
+  .ok { color: #6fd36f; } .no { color: #ff8a65; }
+  #t { font-size: 56px; text-align: center; margin: 18px 0; font-variant-numeric: tabular-nums; }
+  button { width: 100%; padding: 16px; font-size: 20px; border: 0; border-radius: 12px; background: #e08a00; color: #111; }
+  small { color: #999; }
+</style>
+</head>
+<body>
+<h1>Zirkel-Timer – Installationstest</h1>
+<div class="row">Als App geöffnet (ohne Browserleiste): <b id="standalone">?</b></div>
+<div class="row">Offline-Speicher: <b id="sw">?</b></div>
+<div class="row">Bildschirm bleibt an: <b id="wl">noch nicht gestartet</b></div>
+<div id="t">00:00</div>
+<button id="go">Test starten</button>
+<p><small>Installieren: Chrome-Menü (⋮) → „App installieren“ bzw. „Zum Startbildschirm hinzufügen“. Danach über das neue Symbol öffnen und hier erneut prüfen.</small></p>
+<script>
+  const yn = (el, v) => { el.textContent = v ? 'Ja' : 'Nein'; el.className = v ? 'ok' : 'no'; };
+  yn(document.getElementById('standalone'), matchMedia('(display-mode: standalone)').matches);
+
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js')
+      .then(() => navigator.serviceWorker.ready)
+      .then(() => yn(document.getElementById('sw'), true))
+      .catch(() => yn(document.getElementById('sw'), false));
+  } else yn(document.getElementById('sw'), false);
+
+  let lock = null, start = null, timer = null;
+  async function keepAwake() {
+    const el = document.getElementById('wl');
+    if (!('wakeLock' in navigator)) { yn(el, false); return; }
+    try { lock = await navigator.wakeLock.request('screen'); yn(el, true); }
+    catch (e) { yn(el, false); }
+  }
+  document.addEventListener('visibilitychange', () => { if (start && document.visibilityState === 'visible') keepAwake(); });
+  document.getElementById('go').onclick = () => {
+    start = Date.now();
+    keepAwake();
+    clearInterval(timer);
+    timer = setInterval(() => {
+      const s = Math.floor((Date.now() - start) / 1000);
+      document.getElementById('t').textContent = String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+    }, 250);
+  };
+</script>
+</body>
+</html>
